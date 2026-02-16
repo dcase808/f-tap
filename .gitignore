@@ -21,3 +21,6 @@ vendor/
 
 # OS
 Thumbs.db
+
+# Scripts (local dev/demo tools)
+scripts/

@@ -1,39 +1,77 @@
 // Package can provides BMW F-Series PT-CAN message decoding.
 //
 // PT-CAN (Powertrain CAN) runs at 500 kbps and carries engine/drivetrain data.
-// CAN IDs sourced from opendbc (commaai/opendbc bmw_e9x_e8x.dbc) which is
-// confirmed to also cover many F-Series models. Verify on your specific car.
+// Signal definitions (PID, bit position, scale, offset, signedness) are derived
+// from DBC analysis. Verify on your specific car.
 package can
 
-// PT-CAN Message IDs (BMW F/E-Series, from opendbc)
+// PT-CAN Message IDs (decimal → hex)
 const (
-	// IDEngineData (0x1D0 / 464) from DME — carries temperatures and pressures.
-	//   Byte 0: TEMP_ENG — Engine coolant temperature (raw - 48 = °C)
-	//   Byte 1: TEMP_EOI — Engine oil temperature (raw - 48 = °C)
-	//   Byte 3: AIP_ENG  — Intake air pressure (raw × 2 + 598 = hPa)
-	//   Bytes 2-3: Counter, warm-up status, engine run state
-	//   Bytes 4-5: IJV_FU — Fuel injector value (raw - 48, °C units)
-	//   Byte 7: RPM_IDLG_TAR — Target idle RPM (raw × 5)
-	IDEngineData uint32 = 0x1D0
-
-	// IDGearboxTorque (0x0B5 / 181) from EGS — torque request + gearbox temp.
-	//   Byte 7: Gearbox_temperature (raw = °C)
-	IDGearboxTorque uint32 = 0x0B5
+	IDThrottlePosition uint32 = 0x0D9 // 217
+	IDEngineSpeed      uint32 = 0x0F3 // 243
+	IDBrake            uint32 = 0x173 // 371 — Brake_Position + Brake_Light
+	IDLongAccel        uint32 = 0x199 // 409
+	IDLatAccel         uint32 = 0x19A // 410
+	IDVehicleSpeed     uint32 = 0x1A1 // 417 — kph & mph
+	IDBatteryCurrent   uint32 = 0x1BA // 442
+	IDWheelSpeeds      uint32 = 0x254 // 596 — FL/FR/RL/RR (kph & mph)
+	IDBatteryVoltage   uint32 = 0x281 // 641
+	IDAirTemperature   uint32 = 0x2CA // 714
+	IDSteeringAngle    uint32 = 0x301 // 769
+	IDTransOilTemp     uint32 = 0x39A // 922
+	IDGearOilTemp      uint32 = 0x3F9 // 1017 — Gear + Oil_Temperature
+	IDAirPressure      uint32 = 0x3FB // 1019
 )
 
-// Atmospheric pressure reference for boost calculation (mbar).
-const AtmosphericPressureMbar = 1013
-
 // VehicleData holds the most recent decoded values from PT-CAN.
+// Float fields use float32 to preserve fractional scales on an RP2040.
 type VehicleData struct {
-	CoolantTemp    int16  // Engine coolant temperature in °C
-	OilTemp        int16  // Engine oil temperature in °C
-	GearboxOilTemp int16  // Gearbox (transmission) oil temperature in °C
-	IntakeAirPress int16  // Intake manifold absolute pressure in hPa
-	BoostMbar      int16  // Boost pressure in mbar (MAP - atmospheric; negative = vacuum)
-	MsgCount       uint32 // Total CAN messages received
-	LastID         uint32 // Last CAN ID seen
-	Initialized    bool   // True once any valid data has been parsed
+	// Temperatures
+	AirTemp     float32 // °C  (PID 714)
+	OilTemp     float32 // °C  (PID 1017)
+	TransOilTemp float32 // °C  (PID 922)
+
+	// Pressures
+	AirPressure float32 // mbar (PID 1019)
+
+	// Battery
+	BatteryVoltage float32 // mV  (PID 641)
+	BatteryCurrent float32 //     (PID 442)
+
+	// Brakes
+	BrakePosition float32 //         (PID 371)
+	BrakeLight    float32 // on/off  (PID 371)
+
+	// Drivetrain
+	Gear        float32 //     (PID 1017)
+	EngineSpeed float32 // rpm (PID 243)
+	ThrottlePos float32 // %   (PID 217)
+
+	// Dynamics
+	LongAccel float32 // m/s² (PID 409)
+	LatAccel  float32 // m/s² (PID 410)
+
+	// Vehicle speed
+	VehicleSpeedKph float32 // km/h (PID 417)
+	VehicleSpeedMph float32 // mph  (PID 417)
+
+	// Steering
+	SteeringAngle float32 // °   (PID 769)
+
+	// Wheel speeds
+	WheelSpeedFLKph float32 // km/h (PID 596)
+	WheelSpeedFRKph float32 // km/h (PID 596)
+	WheelSpeedRLKph float32 // km/h (PID 596)
+	WheelSpeedRRKph float32 // km/h (PID 596)
+	WheelSpeedFLMph float32 // mph  (PID 596)
+	WheelSpeedFRMph float32 // mph  (PID 596)
+	WheelSpeedRLMph float32 // mph  (PID 596)
+	WheelSpeedRRMph float32 // mph  (PID 596)
+
+	// Metadata
+	MsgCount    uint32 // Total CAN messages received
+	LastID      uint32 // Last CAN ID seen
+	Initialized bool   // True once any valid data has been parsed
 }
 
 // ParseMessage decodes a raw CAN message and updates VehicleData.
@@ -43,28 +81,196 @@ func (v *VehicleData) ParseMessage(id uint32, data []byte) bool {
 	v.LastID = id
 
 	switch id {
-	case IDEngineData:
-		if len(data) >= 4 {
-			// Byte 0: Coolant temp — raw - 48 = °C
-			v.CoolantTemp = int16(data[0]) - 48
 
-			// Byte 1: Oil temp — raw - 48 = °C
-			v.OilTemp = int16(data[1]) - 48
+	// ── Air_Pressure (PID 1019) ──
+	// StartBit=0, BitLen=8, Offset=598, Scale=2, Unsigned, Intel
+	case IDAirPressure:
+		if len(data) >= 1 {
+			raw := uint16(data[0])
+			v.AirPressure = float32(raw)*2 + 598
+			v.Initialized = true
+		}
+		return true
 
-			// Byte 3: Intake air pressure — raw × 2 + 598 = hPa
-			v.IntakeAirPress = int16(data[3])*2 + 598
+	// ── Air_Temperature (PID 714) ──
+	// StartBit=8, BitLen=8, Offset=-40, Scale=0.5, Unsigned, Intel
+	case IDAirTemperature:
+		if len(data) >= 2 {
+			raw := uint16(data[1])
+			v.AirTemp = float32(raw)*0.5 + (-40)
+			v.Initialized = true
+		}
+		return true
 
-			// Boost = MAP - atmospheric (in mbar, 1 hPa = 1 mbar)
-			v.BoostMbar = v.IntakeAirPress - AtmosphericPressureMbar
+	// ── Battery_Voltage (PID 641) ──
+	// StartBit=0, BitLen=12, Offset=0, Scale=15, Unsigned, Intel
+	case IDBatteryVoltage:
+		if len(data) >= 2 {
+			raw := uint16(data[0]) | (uint16(data[1]) << 8)
+			raw &= 0x0FFF // 12 bits
+			v.BatteryVoltage = float32(raw) * 15
+			v.Initialized = true
+		}
+		return true
+
+	// ── Brake_Position + Brake_Light (PID 371) ──
+	case IDBrake:
+		if len(data) >= 8 {
+			// Brake_Position: StartBit=56, BitLen=6, Offset=0, Scale=1, Unsigned, Intel
+			raw := uint16(data[7])
+			raw &= 0x3F // 6 bits
+			v.BrakePosition = float32(raw)
+
+			// Brake_Light: StartBit=3, BitLen=2, Offset=0, Scale=0.5, Unsigned, Motorola
+			// Motorola bit 3 in a single byte → byte 0, bits [3:2]
+			rawBL := uint16((data[0] >> 2) & 0x03)
+			v.BrakeLight = float32(rawBL) * 0.5
 
 			v.Initialized = true
 		}
 		return true
 
-	case IDGearboxTorque:
+	// ── Battery_Current (PID 442) ──
+	// StartBit=24, BitLen=16, Offset=-200, Scale=0.02, Unsigned, Intel
+	case IDBatteryCurrent:
+		if len(data) >= 5 {
+			raw := uint16(data[3]) | (uint16(data[4]) << 8)
+			v.BatteryCurrent = float32(raw)*0.02 + (-200)
+			v.Initialized = true
+		}
+		return true
+
+	// ── Gear + Oil_Temperature (PID 1017) ──
+	case IDGearOilTemp:
+		if len(data) >= 7 {
+			// Gear: StartBit=48, BitLen=4, Offset=0, Scale=1, Unsigned, Intel
+			rawGear := uint16(data[6]) & 0x0F
+			v.Gear = float32(rawGear)
+
+			// Oil_Temperature: StartBit=40, BitLen=8, Offset=-48, Scale=1, Unsigned, Intel
+			rawOil := uint16(data[5])
+			v.OilTemp = float32(rawOil) + (-48)
+
+			v.Initialized = true
+		}
+		return true
+
+	// ── Transmission_Oil_Temperature (PID 922) ──
+	// StartBit=8, BitLen=8, Offset=-48, Scale=1, Unsigned, Intel
+	case IDTransOilTemp:
+		if len(data) >= 2 {
+			raw := uint16(data[1])
+			v.TransOilTemp = float32(raw) + (-48)
+			v.Initialized = true
+		}
+		return true
+
+	// ── Longitudinal Acceleration (PID 409) ──
+	// StartBit=16, BitLen=16, Offset=-65, Scale=0.002, Unsigned, Intel
+	case IDLongAccel:
+		if len(data) >= 4 {
+			raw := uint16(data[2]) | (uint16(data[3]) << 8)
+			v.LongAccel = float32(raw)*0.002 + (-65)
+			v.Initialized = true
+		}
+		return true
+
+	// ── Lateral Acceleration (PID 410) ──
+	// StartBit=16, BitLen=16, Offset=-65, Scale=0.002, Unsigned, Intel
+	case IDLatAccel:
+		if len(data) >= 4 {
+			raw := uint16(data[2]) | (uint16(data[3]) << 8)
+			v.LatAccel = float32(raw)*0.002 + (-65)
+			v.Initialized = true
+		}
+		return true
+
+	// ── Engine_Speed (PID 243) ──
+	// StartBit=12, BitLen=12, Offset=0, Scale=10, Unsigned, Intel
+	case IDEngineSpeed:
+		if len(data) >= 3 {
+			// Bits 12..23 across bytes 1-2 (Intel byte order)
+			raw := (uint16(data[1]) >> 4) | (uint16(data[2]) << 4)
+			raw &= 0x0FFF // 12 bits
+			v.EngineSpeed = float32(raw) * 10
+			v.Initialized = true
+		}
+		return true
+
+	// ── Vehicle Speed (PID 417) — kph + mph ──
+	case IDVehicleSpeed:
+		if len(data) >= 4 {
+			raw := uint16(data[2]) | (uint16(data[3]) << 8)
+
+			// Indicated_Vehicle_Speed_kph: Scale=0.015625
+			v.VehicleSpeedKph = float32(raw) * 0.015625
+
+			// Indicated_Vehicle_Speed_mph: Scale=0.009703125
+			v.VehicleSpeedMph = float32(raw) * 0.009703125
+
+			v.Initialized = true
+		}
+		return true
+
+	// ── Wheel Speeds (PID 596) — FL/FR/RL/RR, kph + mph ──
+	// All 15-bit Signed Intel; RL=bit0, RR=bit16, FL=bit32, FR=bit48
+	case IDWheelSpeeds:
 		if len(data) >= 8 {
-			// Byte 7: Gearbox oil temperature in °C
-			v.GearboxOilTemp = int16(data[7])
+			// Wheel_Speed_RL: StartBit=0, BitLen=15, Signed
+			rawRL := int16(uint16(data[0])|(uint16(data[1])<<8)) & 0x7FFF
+			if rawRL&0x4000 != 0 {
+				rawRL |= ^int16(0x3FFF) // sign-extend 15 bits
+			}
+
+			// Wheel_Speed_RR: StartBit=16, BitLen=15, Signed
+			rawRR := int16(uint16(data[2])|(uint16(data[3])<<8)) & 0x7FFF
+			if rawRR&0x4000 != 0 {
+				rawRR |= ^int16(0x3FFF)
+			}
+
+			// Wheel_Speed_FL: StartBit=32, BitLen=15, Signed
+			rawFL := int16(uint16(data[4])|(uint16(data[5])<<8)) & 0x7FFF
+			if rawFL&0x4000 != 0 {
+				rawFL |= ^int16(0x3FFF)
+			}
+
+			// Wheel_Speed_FR: StartBit=48, BitLen=15, Signed
+			rawFR := int16(uint16(data[6])|(uint16(data[7])<<8)) & 0x7FFF
+			if rawFR&0x4000 != 0 {
+				rawFR |= ^int16(0x3FFF)
+			}
+
+			v.WheelSpeedRLKph = float32(rawRL) * 0.015625
+			v.WheelSpeedRRKph = float32(rawRR) * 0.015625
+			v.WheelSpeedFLKph = float32(rawFL) * 0.015625
+			v.WheelSpeedFRKph = float32(rawFR) * 0.015625
+
+			v.WheelSpeedRLMph = float32(rawRL) * 0.009703125
+			v.WheelSpeedRRMph = float32(rawRR) * 0.009703125
+			v.WheelSpeedFLMph = float32(rawFL) * 0.009703125
+			v.WheelSpeedFRMph = float32(rawFR) * 0.009703125
+
+			v.Initialized = true
+		}
+		return true
+
+	// ── Steering_Angle (PID 769) ──
+	// StartBit=16, BitLen=16, Offset=-1440.11, Scale=0.04395, Unsigned, Intel
+	case IDSteeringAngle:
+		if len(data) >= 4 {
+			raw := uint16(data[2]) | (uint16(data[3]) << 8)
+			v.SteeringAngle = float32(raw)*0.04395 + (-1440.11)
+			v.Initialized = true
+		}
+		return true
+
+	// ── Throttle_Position (PID 217) ──
+	// StartBit=16, BitLen=12, Offset=0, Scale=0.025, Unsigned, Intel
+	case IDThrottlePosition:
+		if len(data) >= 4 {
+			raw := uint16(data[2]) | (uint16(data[3]) << 8)
+			raw &= 0x0FFF // 12 bits
+			v.ThrottlePos = float32(raw) * 0.025
 			v.Initialized = true
 		}
 		return true

@@ -20,6 +20,14 @@ const (
 	i2cAddr      = 0x3C // Default SSD1309 I2C address
 )
 
+// G-force visualizer parameters
+const (
+	gCenterX int16   = 64
+	gCenterY int16   = 32
+	gRadius  int16   = 18
+	gMaxAccel float32 = 15.0 // m/s² full scale (≈1.5g)
+)
+
 // OLED wraps the SSD1306 device and provides high-level rendering.
 type OLED struct {
 	dev ssd1306.Device
@@ -27,6 +35,18 @@ type OLED struct {
 
 // white is the "on" pixel color for monochrome OLED.
 var white = color.RGBA{R: 255, G: 255, B: 255, A: 255}
+
+// Icon bitmaps — each byte is one row, MSB = leftmost pixel.
+var (
+	// Oil drop (7px wide × 8px tall)
+	iconOil = [8]byte{0x10, 0x38, 0x7C, 0xFE, 0xFE, 0xFE, 0x7C, 0x38}
+
+	// Gear/cog (8px wide × 8px tall)
+	iconGear = [8]byte{0x5A, 0xFF, 0xC3, 0xBD, 0xBD, 0xC3, 0xFF, 0x5A}
+
+	// Thermometer (5px wide × 8px tall)
+	iconThermo = [8]byte{0x20, 0x50, 0x70, 0x50, 0x70, 0xF8, 0xF8, 0x70}
+)
 
 // New creates and configures the OLED display on the given I2C bus.
 func New(bus *machine.I2C) *OLED {
@@ -72,69 +92,145 @@ func (o *OLED) ShowWaiting(msgCount uint32) {
 // Render draws the main vehicle data screen.
 //
 // Layout (128×64):
-//   Row 1: CLT + OIL temps
-//   Row 2: GBX temp
-//   ─── separator ───
-//   Row 3: Boost pressure (mbar)
-//   Row 4: Status bar
+//
+//	Top-left:     Oil icon + oil temp
+//	Top-right:    Gear icon + trans oil temp
+//	Center:       G-force crosshair visualizer
+//	Bottom-left:  Thermometer icon + air temp
+//	Bottom-right: Current gear number
 func (o *OLED) Render(data *can.VehicleData) {
 	o.dev.ClearDisplay()
 
-	// ── Row 1: Coolant + Oil (y=10) ──
-	cltStr := "CLT:" + fmtI16(data.CoolantTemp) + "C"
-	tinyfont.WriteLine(&o.dev, &proggy.TinySZ8pt7b, 0, 10, cltStr, white)
+	// ── Top-left: Oil temp (drop icon + value) ──
+	drawIcon(&o.dev, 1, 1, iconOil[:], 7)
+	tinyfont.WriteLine(&o.dev, &proggy.TinySZ8pt7b, 10, 10, fmtF32(data.OilTemp)+"C", white)
 
-	oilStr := "OIL:" + fmtI16(data.OilTemp) + "C"
-	tinyfont.WriteLine(&o.dev, &proggy.TinySZ8pt7b, 72, 10, oilStr, white)
+	// ── Top-right: Trans oil temp (gear icon + value) ──
+	drawIcon(&o.dev, 94, 1, iconGear[:], 8)
+	tinyfont.WriteLine(&o.dev, &proggy.TinySZ8pt7b, 104, 10, fmtF32(data.TransOilTemp)+"C", white)
 
-	// ── Row 2: Gearbox oil temp (y=22) ──
-	gbxStr := "GBX:" + fmtI16(data.GearboxOilTemp) + "C"
-	tinyfont.WriteLine(&o.dev, &proggy.TinySZ8pt7b, 0, 22, gbxStr, white)
+	// ── Center: G-force visualizer ──
+	drawGForceViz(&o.dev, data.LatAccel, data.LongAccel)
 
-	// ── Separator ──
-	drawHLine(&o.dev, 26)
+	// G-force values on either side of the circle (symmetric 2px gap)
+	// Right side: X (lateral), left-aligned at circle_right + 2
+	tinyfont.WriteLine(&o.dev, &proggy.TinySZ8pt7b, 84, 30, "X:"+fmtF32(data.LatAccel), white)
+	tinyfont.WriteLine(&o.dev, &proggy.TinySZ8pt7b, 84, 40, "m/s2", white)
+	// Left side: Y (longitudinal), right-aligned to circle_left - 2
+	yStr := "Y:" + fmtF32(data.LongAccel)
+	tinyfont.WriteLine(&o.dev, &proggy.TinySZ8pt7b, 44-int16(len(yStr))*6, 30, yStr, white)
+	tinyfont.WriteLine(&o.dev, &proggy.TinySZ8pt7b, 44-4*6, 40, "m/s2", white)
 
-	// ── Row 3: Boost pressure in mbar (y=40) ──
-	boostStr := "BOOST:"
-	if data.BoostMbar >= 0 {
-		boostStr += "+" + fmtI16(data.BoostMbar)
-	} else {
-		boostStr += fmtI16(data.BoostMbar)
-	}
-	boostStr += " mbar"
-	tinyfont.WriteLine(&o.dev, &proggy.TinySZ8pt7b, 0, 40, boostStr, white)
+	// ── Bottom-left: Air temp (thermometer icon + value) ──
+	drawIcon(&o.dev, 1, 52, iconThermo[:], 5)
+	tinyfont.WriteLine(&o.dev, &proggy.TinySZ8pt7b, 8, 60, fmtF32(data.AirTemp)+"C", white)
 
-	// ── Separator ──
-	drawHLine(&o.dev, 48)
-
-	// ── Row 4: Status bar (y=60) ──
-	statusStr := "ID:" + fmtHex(data.LastID) + " #" + fmtU32(data.MsgCount)
-	tinyfont.WriteLine(&o.dev, &proggy.TinySZ8pt7b, 0, 60, statusStr, white)
+	// ── Bottom-right: Gear number (just the digit) ──
+	gearStr := fmtF32(data.Gear)
+	gearX := int16(128 - len(gearStr)*6 - 2)
+	tinyfont.WriteLine(&o.dev, &proggy.TinySZ8pt7b, gearX, 60, gearStr, white)
 
 	o.dev.Display()
 }
 
-// ── Helpers ──
+// ── G-Force Visualizer ──
 
-// drawHLine draws a horizontal line across the full screen width at y.
+// drawGForceViz draws a circle with crosshair and a moving dot
+// representing current lateral and longitudinal acceleration.
+func drawGForceViz(dev *ssd1306.Device, latAccel, longAccel float32) {
+	// Circle outline
+	drawCircle(dev, gCenterX, gCenterY, gRadius)
+
+	// Crosshair lines
+	for x := gCenterX - gRadius; x <= gCenterX+gRadius; x++ {
+		dev.SetPixel(x, gCenterY, white)
+	}
+	for y := gCenterY - gRadius; y <= gCenterY+gRadius; y++ {
+		dev.SetPixel(gCenterX, y, white)
+	}
+
+	// Map acceleration → pixel offset (lateral=X, longitudinal=Y inverted)
+	dx := int16(latAccel * float32(gRadius) / gMaxAccel)
+	dy := int16(-longAccel * float32(gRadius) / gMaxAccel)
+
+	// Clamp to radius
+	if dx > gRadius {
+		dx = gRadius
+	}
+	if dx < -gRadius {
+		dx = -gRadius
+	}
+	if dy > gRadius {
+		dy = gRadius
+	}
+	if dy < -gRadius {
+		dy = -gRadius
+	}
+
+	// Draw dot (3×3 filled square)
+	dotX := gCenterX + dx
+	dotY := gCenterY + dy
+	for py := dotY - 1; py <= dotY+1; py++ {
+		for px := dotX - 1; px <= dotX+1; px++ {
+			if px >= 0 && px < screenWidth && py >= 0 && py < screenHeight {
+				dev.SetPixel(px, py, white)
+			}
+		}
+	}
+}
+
+// drawCircle draws a circle outline using the midpoint circle algorithm.
+func drawCircle(dev *ssd1306.Device, cx, cy, r int16) {
+	x := r
+	y := int16(0)
+	d := 1 - r
+
+	for x >= y {
+		dev.SetPixel(cx+x, cy+y, white)
+		dev.SetPixel(cx+y, cy+x, white)
+		dev.SetPixel(cx-y, cy+x, white)
+		dev.SetPixel(cx-x, cy+y, white)
+		dev.SetPixel(cx-x, cy-y, white)
+		dev.SetPixel(cx-y, cy-x, white)
+		dev.SetPixel(cx+y, cy-x, white)
+		dev.SetPixel(cx+x, cy-y, white)
+
+		y++
+		if d > 0 {
+			x--
+			d += 2*(y-x) + 1
+		} else {
+			d += 2*y + 1
+		}
+	}
+}
+
+// ── Drawing Helpers ──
+
+// drawIcon renders a bitmap icon. Each byte = one row, MSB = leftmost pixel.
+func drawIcon(dev *ssd1306.Device, x, y int16, bitmap []byte, w int16) {
+	for row := range bitmap {
+		for col := int16(0); col < w; col++ {
+			if bitmap[row]&(0x80>>uint(col)) != 0 {
+				dev.SetPixel(x+col, y+int16(row), white)
+			}
+		}
+	}
+}
+
 func drawHLine(dev *ssd1306.Device, y int16) {
 	for x := int16(0); x < screenWidth; x++ {
 		dev.SetPixel(x, y, white)
 	}
 }
 
-func fmtI16(v int16) string {
+// ── Format Helpers ──
+
+// fmtF32 formats a float32 as an integer string (truncates decimals).
+func fmtF32(v float32) string {
 	return strconv.FormatInt(int64(v), 10)
 }
 
 func fmtU32(v uint32) string {
 	return strconv.FormatUint(uint64(v), 10)
-}
-
-func fmtHex(v uint32) string {
-	s := strconv.FormatUint(uint64(v), 16)
-	for len(s) < 3 {
-		s = "0" + s
-	}
-	return s
 }
