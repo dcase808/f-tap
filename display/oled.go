@@ -17,20 +17,24 @@ import (
 const (
 	screenWidth  = 128
 	screenHeight = 64
-	i2cAddr      = 0x3C // Default SSD1309 I2C address
+	i2cAddr      = 0x3C
+	fontWidth    = 6
 )
 
 // G-force visualizer parameters
 const (
-	gCenterX int16   = 64
-	gCenterY int16   = 32
-	gRadius  int16   = 18
-	gMaxAccel float32 = 15.0 // m/s² full scale (≈1.5g)
+	gCenterX       int16   = 64
+	gCenterY       int16   = 32
+	gRadius        int16   = 18
+	gMaxAccel      float32 = 15.0 // m/s² full scale (≈1.5g)
+	smoothingAlpha float32 = 0.3  // EMA smoothing (0.3 = minimal smoothing)
 )
 
 // OLED wraps the SSD1306 device and provides high-level rendering.
 type OLED struct {
-	dev ssd1306.Device
+	dev               ssd1306.Device
+	smoothedLatAccel  float32
+	smoothedLongAccel float32
 }
 
 // white is the "on" pixel color for monochrome OLED.
@@ -110,16 +114,9 @@ func (o *OLED) Render(data *can.VehicleData) {
 	tinyfont.WriteLine(&o.dev, &proggy.TinySZ8pt7b, 104, 10, fmtF32(data.TransOilTemp)+"C", white)
 
 	// ── Center: G-force visualizer ──
-	drawGForceViz(&o.dev, data.LatAccel, data.LongAccel)
-
-	// G-force values on either side of the circle (symmetric 2px gap)
-	// Right side: X (lateral), left-aligned at circle_right + 2
-	tinyfont.WriteLine(&o.dev, &proggy.TinySZ8pt7b, 84, 30, "X:"+fmtF32(data.LatAccel), white)
-	tinyfont.WriteLine(&o.dev, &proggy.TinySZ8pt7b, 84, 40, "m/s2", white)
-	// Left side: Y (longitudinal), right-aligned to circle_left - 2
-	yStr := "Y:" + fmtF32(data.LongAccel)
-	tinyfont.WriteLine(&o.dev, &proggy.TinySZ8pt7b, 44-int16(len(yStr))*6, 30, yStr, white)
-	tinyfont.WriteLine(&o.dev, &proggy.TinySZ8pt7b, 44-4*6, 40, "m/s2", white)
+	o.smoothAccel(data.LatAccel, data.LongAccel)
+	drawGForceViz(&o.dev, o.smoothedLatAccel, o.smoothedLongAccel)
+	drawGForceLabels(&o.dev, o.smoothedLatAccel, o.smoothedLongAccel)
 
 	// ── Bottom-left: Air temp (thermometer icon + value) ──
 	drawIcon(&o.dev, 1, 52, iconThermo[:], 5)
@@ -127,13 +124,30 @@ func (o *OLED) Render(data *can.VehicleData) {
 
 	// ── Bottom-right: Gear number (just the digit) ──
 	gearStr := fmtF32(data.Gear)
-	gearX := int16(128 - len(gearStr)*6 - 2)
+	gearX := int16(128 - len(gearStr)*fontWidth - 2)
 	tinyfont.WriteLine(&o.dev, &proggy.TinySZ8pt7b, gearX, 60, gearStr, white)
 
 	o.dev.Display()
 }
 
 // ── G-Force Visualizer ──
+
+// smoothAccel applies EMA smoothing to acceleration values.
+func (o *OLED) smoothAccel(latAccel, longAccel float32) {
+	o.smoothedLatAccel = smoothingAlpha*latAccel + (1-smoothingAlpha)*o.smoothedLatAccel
+	o.smoothedLongAccel = smoothingAlpha*longAccel + (1-smoothingAlpha)*o.smoothedLongAccel
+}
+
+// drawGForceLabels draws the X/Y acceleration labels beside the visualizer.
+func drawGForceLabels(dev *ssd1306.Device, latAccel, longAccel float32) {
+	// Right side: X (lateral), left-aligned at circle_right + 2
+	tinyfont.WriteLine(dev, &proggy.TinySZ8pt7b, 84, 30, "X:"+fmtF32One(latAccel), white)
+	tinyfont.WriteLine(dev, &proggy.TinySZ8pt7b, 84, 40, "m/s2", white)
+	// Left side: Y (longitudinal), right-aligned to circle_left - 2
+	yStr := "Y:" + fmtF32One(longAccel)
+	tinyfont.WriteLine(dev, &proggy.TinySZ8pt7b, 44-int16(len(yStr))*fontWidth, 30, yStr, white)
+	tinyfont.WriteLine(dev, &proggy.TinySZ8pt7b, 44-4*fontWidth, 40, "m/s2", white)
+}
 
 // drawGForceViz draws a circle with crosshair and a moving dot
 // representing current lateral and longitudinal acceleration.
@@ -229,6 +243,16 @@ func drawHLine(dev *ssd1306.Device, y int16) {
 // fmtF32 formats a float32 as an integer string (truncates decimals).
 func fmtF32(v float32) string {
 	return strconv.FormatInt(int64(v), 10)
+}
+
+// fmtF32One formats a float32 with one decimal place.
+func fmtF32One(v float32) string {
+	intPart := int32(v)
+	fracPart := int32((v - float32(intPart)) * 10)
+	if fracPart < 0 {
+		fracPart = -fracPart
+	}
+	return strconv.FormatInt(int64(intPart), 10) + "." + strconv.FormatInt(int64(fracPart), 10)
 }
 
 func fmtU32(v uint32) string {

@@ -25,13 +25,20 @@ const (
 	IDAirPressure      uint32 = 0x3FB // 1019
 )
 
+// Signal decoding constants (from DBC analysis)
+const (
+	airPressureOffset   float32 = 598.0
+	steeringAngleScale  float32 = 0.04395
+	steeringAngleOffset float32 = 1440.11
+)
+
 // VehicleData holds the most recent decoded values from PT-CAN.
 // Float fields use float32 to preserve fractional scales on an RP2040.
 type VehicleData struct {
 	sync.RWMutex
 	// Temperatures
-	AirTemp     float32 // °C  (PID 714)
-	OilTemp     float32 // °C  (PID 1017)
+	AirTemp      float32 // °C  (PID 714)
+	OilTemp      float32 // °C  (PID 1017)
 	TransOilTemp float32 // °C  (PID 922)
 
 	// Pressures
@@ -93,7 +100,7 @@ func (v *VehicleData) ParseMessage(id uint32, data []byte) bool {
 	case IDAirPressure:
 		if len(data) >= 1 {
 			raw := uint16(data[0])
-			v.AirPressure = float32(raw)*2 + 598
+			v.AirPressure = float32(raw)*2 + airPressureOffset
 			v.Initialized = true
 		}
 		return true
@@ -103,7 +110,7 @@ func (v *VehicleData) ParseMessage(id uint32, data []byte) bool {
 	case IDAirTemperature:
 		if len(data) >= 2 {
 			raw := uint16(data[1])
-			v.AirTemp = float32(raw)*0.5 + (-40)
+			v.AirTemp = float32(raw)*0.5 - 40
 			v.Initialized = true
 		}
 		return true
@@ -141,7 +148,7 @@ func (v *VehicleData) ParseMessage(id uint32, data []byte) bool {
 	case IDBatteryCurrent:
 		if len(data) >= 5 {
 			raw := uint16(data[3]) | (uint16(data[4]) << 8)
-			v.BatteryCurrent = float32(raw)*0.02 + (-200)
+			v.BatteryCurrent = float32(raw)*0.02 - 200
 			v.Initialized = true
 		}
 		return true
@@ -155,7 +162,7 @@ func (v *VehicleData) ParseMessage(id uint32, data []byte) bool {
 
 			// Oil_Temperature: StartBit=40, BitLen=8, Offset=-48, Scale=1, Unsigned, Intel
 			rawOil := uint16(data[5])
-			v.OilTemp = float32(rawOil) + (-48)
+			v.OilTemp = float32(rawOil) - 48
 
 			v.Initialized = true
 		}
@@ -166,7 +173,7 @@ func (v *VehicleData) ParseMessage(id uint32, data []byte) bool {
 	case IDTransOilTemp:
 		if len(data) >= 2 {
 			raw := uint16(data[1])
-			v.TransOilTemp = float32(raw) + (-48)
+			v.TransOilTemp = float32(raw) - 48
 			v.Initialized = true
 		}
 		return true
@@ -176,7 +183,7 @@ func (v *VehicleData) ParseMessage(id uint32, data []byte) bool {
 	case IDLongAccel:
 		if len(data) >= 4 {
 			raw := uint16(data[2]) | (uint16(data[3]) << 8)
-			v.LongAccel = float32(raw)*0.002 + (-65)
+			v.LongAccel = float32(raw)*0.002 - 65
 			v.Initialized = true
 		}
 		return true
@@ -186,7 +193,7 @@ func (v *VehicleData) ParseMessage(id uint32, data []byte) bool {
 	case IDLatAccel:
 		if len(data) >= 4 {
 			raw := uint16(data[2]) | (uint16(data[3]) << 8)
-			v.LatAccel = float32(raw)*0.002 + (-65)
+			v.LatAccel = float32(raw)*0.002 - 65
 			v.Initialized = true
 		}
 		return true
@@ -265,7 +272,7 @@ func (v *VehicleData) ParseMessage(id uint32, data []byte) bool {
 	case IDSteeringAngle:
 		if len(data) >= 4 {
 			raw := uint16(data[2]) | (uint16(data[3]) << 8)
-			v.SteeringAngle = float32(raw)*0.04395 + (-1440.11)
+			v.SteeringAngle = float32(raw)*steeringAngleScale - steeringAngleOffset
 			v.Initialized = true
 		}
 		return true
