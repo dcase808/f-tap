@@ -5,6 +5,8 @@
 // from DBC analysis. Verify on your specific car.
 package can
 
+import "sync"
+
 // PT-CAN Message IDs (decimal → hex)
 const (
 	IDThrottlePosition uint32 = 0x0D9 // 217
@@ -26,6 +28,7 @@ const (
 // VehicleData holds the most recent decoded values from PT-CAN.
 // Float fields use float32 to preserve fractional scales on an RP2040.
 type VehicleData struct {
+	sync.RWMutex
 	// Temperatures
 	AirTemp     float32 // °C  (PID 714)
 	OilTemp     float32 // °C  (PID 1017)
@@ -77,6 +80,9 @@ type VehicleData struct {
 // ParseMessage decodes a raw CAN message and updates VehicleData.
 // Returns true if the message ID was recognized and parsed.
 func (v *VehicleData) ParseMessage(id uint32, data []byte) bool {
+	v.Lock()
+	defer v.Unlock()
+
 	v.MsgCount++
 	v.LastID = id
 
@@ -277,4 +283,13 @@ func (v *VehicleData) ParseMessage(id uint32, data []byte) bool {
 	}
 
 	return false
+}
+
+// Snapshot returns a point-in-time copy of the vehicle data.
+// The caller receives a plain value with no lock references.
+func (v *VehicleData) Snapshot() VehicleData {
+	v.RLock()
+	defer v.RUnlock()
+
+	return *v
 }

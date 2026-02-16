@@ -92,40 +92,47 @@ func main() {
 		blinkError(led)
 	}
 
-	// ── Main data structures ──
+	// ── Shared vehicle state (RWMutex embedded in VehicleData) ──
 	var vehicleData can.VehicleData
 
-	lastDraw := time.Now()
-	ledState := true
+	// ── Launch goroutines ──
+	go readCAN(canDev, &vehicleData)
+	go renderDisplay(oled, &vehicleData)
 
-	// ── Main loop ──
+	// ── Main goroutine: LED heartbeat ──
 	for {
-		// Poll for received CAN messages
+		led.Low()
+		time.Sleep(displayRefreshInterval)
+		led.High()
+		time.Sleep(displayRefreshInterval)
+	}
+}
+
+// readCAN continuously polls the MCP2515 for incoming CAN frames
+// and updates vehicleData. ParseMessage acquires a write lock internally.
+func readCAN(canDev *mcp2515.Device, data *can.VehicleData) {
+	for {
 		if canDev.Received() {
 			msg, err := canDev.Rx()
 			if err == nil && msg != nil {
-				vehicleData.ParseMessage(msg.ID, msg.Data)
+				data.ParseMessage(msg.ID, msg.Data)
 			}
 		}
+	}
+}
 
-		// Refresh display at fixed interval
-		now := time.Now()
-		if now.Sub(lastDraw) >= displayRefreshInterval {
-			lastDraw = now
+// renderDisplay redraws the OLED at a fixed interval.
+// It takes a read-lock snapshot of vehicleData so CAN reads aren't
+// blocked during the slow I2C transfer.
+func renderDisplay(oled *display.OLED, data *can.VehicleData) {
+	for {
+		time.Sleep(displayRefreshInterval)
 
-			if vehicleData.Initialized {
-				oled.Render(&vehicleData)
-			} else {
-				oled.ShowWaiting(vehicleData.MsgCount)
-			}
-
-			// Toggle LED as heartbeat
-			ledState = !ledState
-			if ledState {
-				led.High()
-			} else {
-				led.Low()
-			}
+		snap := data.Snapshot()
+		if snap.Initialized {
+			oled.Render(&snap)
+		} else {
+			oled.ShowWaiting(snap.MsgCount)
 		}
 	}
 }
@@ -133,14 +140,10 @@ func main() {
 // blinkError blinks the LED rapidly to indicate an initialization error.
 // This blocks forever — the device must be reset after fixing the issue.
 func blinkError(led machine.Pin) {
-	state := false
 	for {
-		state = !state
-		if state {
-			led.High()
-		} else {
-			led.Low()
-		}
+		led.Low()
+		time.Sleep(100 * time.Millisecond)
+		led.High()
 		time.Sleep(100 * time.Millisecond)
 	}
 }
