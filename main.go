@@ -39,7 +39,7 @@ const (
 )
 
 // Display refresh interval
-const displayRefreshInterval = 100 * time.Millisecond
+const displayRefreshInterval = 50 * time.Millisecond
 
 func main() {
 	// ── LED heartbeat ──
