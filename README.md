@@ -31,7 +31,7 @@ Taps into the BMW F-Series **PT-CAN** (Powertrain CAN) bus, decodes key vehicle 
 
 Wheel speeds are also decoded in mph (`× 0.009703125`) from the same PID `0x254`.
 
-> **Note:** Signals are in Intel (little-endian) byte order unless noted as Motorola. PID mapping data sourced from **RACELOGIC Vehicle CAN Database**. Edit [`can/ptcan.go`](can/ptcan.go) to adjust for your vehicle.
+> **Note:** Signals are in Intel (little-endian) byte order unless noted as Motorola. PID mapping data sourced from **RACELOGIC Vehicle CAN Database**, configured for **BMW F22** out of the box. Edit [`can/ptcan.go`](can/ptcan.go) to adjust for your vehicle.
 
 ## OLED Display Layout
 
