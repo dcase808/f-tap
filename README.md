@@ -106,9 +106,7 @@ tinygo flash -target=pico .
 
 > ⚠️ **WARNING:** Only connect in **listen-only mode**. Incorrect CAN bus connections can interfere with vehicle systems. Always tap — never inject.
 
-BMW F-Series PT-CAN runs at **500 kbps**. The PT-CAN bus is accessible through:
-- **OBD-II port** pins 6 (CAN-H) and 14 (CAN-L)  
-- Direct connection at the DME/DDE or other PT-CAN ECUs
+BMW F-Series PT-CAN runs at **500 kbps**. Connect directly at the DME/DDE or other PT-CAN ECUs.
 
 Connect MCP2515 **CAN-H** and **CAN-L** to the PT-CAN bus. A 120Ω termination resistor may be needed depending on your tap point.
 
