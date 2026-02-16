@@ -1,0 +1,23 @@
+# Build artifacts
+build/
+*.uf2
+*.elf
+*.hex
+*.bin
+
+# TinyGo cache
+.tinygo-cache/
+
+# Go workspace
+vendor/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# OS
+Thumbs.db
