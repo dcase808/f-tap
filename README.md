@@ -122,6 +122,4 @@ f-tap/
 ├── go.mod
 ├── Makefile
 └── README.md
-```
-
-MIT
+``
