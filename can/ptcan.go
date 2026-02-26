@@ -164,9 +164,9 @@ func (v *VehicleData) ParseMessage(id uint32, data []byte) bool {
 	// ── Gear + Oil_Temperature (PID 1017) ──
 	case IDGearOilTemp:
 		if len(data) >= 7 {
-			// Gear: StartBit=48, BitLen=4, Offset=0, Scale=1, Unsigned, Intel
+			// Gear: StartBit=48, BitLen=4, Offset=-4, Scale=1, Unsigned, Intel
 			rawGear := uint16(data[6]) & 0x0F
-			v.Gear = float32(rawGear)
+			v.Gear = float32(rawGear) - 4
 
 			// Oil_Temperature: StartBit=40, BitLen=8, Offset=-48, Scale=1, Unsigned, Intel
 			rawOil := uint16(data[5])

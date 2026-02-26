@@ -251,19 +251,21 @@ func drawHLine(dev *ssd1306.Device, y int16) {
 
 // ── Gear Mapping ──
 
-// gearLabel maps a raw gear value to a display label.
-// BMW F-Series EGS: 0=N, 1–8=forward gears, 14=P, 15=R.
-func gearLabel(raw float32) string {
-	g := int32(raw + 0.5) // round to nearest int
+// gearLabel maps a physical gear value (with offset already applied) to a
+// display label. Racelogic source: Offset=-4, range [-4, 11].
+// Expected mapping: 0=N, 1–8=forward gears, -1=R, 11=P.
+// Verify R and P assignments on hardware.
+func gearLabel(v float32) string {
+	g := int32(v + 0.5) // round to nearest int (offset already applied)
 	switch {
 	case g == 0:
 		return "N"
 	case g >= 1 && g <= 8:
 		return strconv.FormatInt(int64(g), 10)
-	case g == 14:
-		return "P"
-	case g == 15:
+	case g == -1:
 		return "R"
+	case g == 11:
+		return "P"
 	default:
 		return "-"
 	}
