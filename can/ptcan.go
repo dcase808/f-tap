@@ -30,6 +30,8 @@ const (
 	airPressureOffset   float32 = 598.0
 	steeringAngleScale  float32 = 0.04395
 	steeringAngleOffset float32 = 1440.11
+	speedScaleKph       float32 = 0.015625    // 1/64
+	speedScaleMph       float32 = 0.009703125 // kph scale × 0.621371
 )
 
 // VehicleState holds the actual data without the mutex.
@@ -44,7 +46,7 @@ type VehicleState struct {
 
 	// Battery
 	BatteryVoltage float32 // mV  (PID 641)
-	BatteryCurrent float32 //     (PID 442)
+	BatteryCurrent float32 // A   (PID 442)
 
 	// Brakes
 	BrakePosition float32 //         (PID 371)
@@ -78,6 +80,7 @@ type VehicleState struct {
 
 	// Metadata
 	MsgCount    uint32 // Total CAN messages received
+	RxErrors    uint32 // Total CAN receive errors
 	LastID      uint32 // Last CAN ID seen
 	Initialized bool   // True once any valid data has been parsed
 }
@@ -221,10 +224,10 @@ func (v *VehicleData) ParseMessage(id uint32, data []byte) bool {
 			raw := uint16(data[2]) | (uint16(data[3]) << 8)
 
 			// Indicated_Vehicle_Speed_kph: Scale=0.015625
-			v.VehicleSpeedKph = float32(raw) * 0.015625
+			v.VehicleSpeedKph = float32(raw) * speedScaleKph
 
 			// Indicated_Vehicle_Speed_mph: Scale=0.009703125
-			v.VehicleSpeedMph = float32(raw) * 0.009703125
+			v.VehicleSpeedMph = float32(raw) * speedScaleMph
 
 			v.Initialized = true
 		}
@@ -234,39 +237,20 @@ func (v *VehicleData) ParseMessage(id uint32, data []byte) bool {
 	// All 15-bit Signed Intel; RL=bit0, RR=bit16, FL=bit32, FR=bit48
 	case IDWheelSpeeds:
 		if len(data) >= 8 {
-			// Wheel_Speed_RL: StartBit=0, BitLen=15, Signed
-			rawRL := int16(uint16(data[0])|(uint16(data[1])<<8)) & 0x7FFF
-			if rawRL&0x4000 != 0 {
-				rawRL |= ^int16(0x3FFF) // sign-extend 15 bits
-			}
+			rawRL := signExtend15(uint16(data[0]) | (uint16(data[1]) << 8))
+			rawRR := signExtend15(uint16(data[2]) | (uint16(data[3]) << 8))
+			rawFL := signExtend15(uint16(data[4]) | (uint16(data[5]) << 8))
+			rawFR := signExtend15(uint16(data[6]) | (uint16(data[7]) << 8))
 
-			// Wheel_Speed_RR: StartBit=16, BitLen=15, Signed
-			rawRR := int16(uint16(data[2])|(uint16(data[3])<<8)) & 0x7FFF
-			if rawRR&0x4000 != 0 {
-				rawRR |= ^int16(0x3FFF)
-			}
+			v.WheelSpeedRLKph = float32(rawRL) * speedScaleKph
+			v.WheelSpeedRRKph = float32(rawRR) * speedScaleKph
+			v.WheelSpeedFLKph = float32(rawFL) * speedScaleKph
+			v.WheelSpeedFRKph = float32(rawFR) * speedScaleKph
 
-			// Wheel_Speed_FL: StartBit=32, BitLen=15, Signed
-			rawFL := int16(uint16(data[4])|(uint16(data[5])<<8)) & 0x7FFF
-			if rawFL&0x4000 != 0 {
-				rawFL |= ^int16(0x3FFF)
-			}
-
-			// Wheel_Speed_FR: StartBit=48, BitLen=15, Signed
-			rawFR := int16(uint16(data[6])|(uint16(data[7])<<8)) & 0x7FFF
-			if rawFR&0x4000 != 0 {
-				rawFR |= ^int16(0x3FFF)
-			}
-
-			v.WheelSpeedRLKph = float32(rawRL) * 0.015625
-			v.WheelSpeedRRKph = float32(rawRR) * 0.015625
-			v.WheelSpeedFLKph = float32(rawFL) * 0.015625
-			v.WheelSpeedFRKph = float32(rawFR) * 0.015625
-
-			v.WheelSpeedRLMph = float32(rawRL) * 0.009703125
-			v.WheelSpeedRRMph = float32(rawRR) * 0.009703125
-			v.WheelSpeedFLMph = float32(rawFL) * 0.009703125
-			v.WheelSpeedFRMph = float32(rawFR) * 0.009703125
+			v.WheelSpeedRLMph = float32(rawRL) * speedScaleMph
+			v.WheelSpeedRRMph = float32(rawRR) * speedScaleMph
+			v.WheelSpeedFLMph = float32(rawFL) * speedScaleMph
+			v.WheelSpeedFRMph = float32(rawFR) * speedScaleMph
 
 			v.Initialized = true
 		}
@@ -295,6 +279,22 @@ func (v *VehicleData) ParseMessage(id uint32, data []byte) bool {
 	}
 
 	return false
+}
+
+// signExtend15 sign-extends a 15-bit unsigned value to int16.
+func signExtend15(raw uint16) int16 {
+	v := int16(raw & 0x7FFF)
+	if v&0x4000 != 0 {
+		v |= ^int16(0x3FFF)
+	}
+	return v
+}
+
+// IncrementRxErrors atomically increments the CAN receive error counter.
+func (v *VehicleData) IncrementRxErrors() {
+	v.Lock()
+	defer v.Unlock()
+	v.RxErrors++
 }
 
 // Snapshot returns a point-in-time copy of the vehicle data.

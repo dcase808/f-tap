@@ -38,8 +38,11 @@ const (
 	canClock = mcp2515.Clock8MHz  // MCP2515 crystal oscillator frequency
 )
 
-// Display refresh interval
-const displayRefreshInterval = 50 * time.Millisecond
+// Timing intervals
+const (
+	displayRefreshInterval = 50 * time.Millisecond
+	heartbeatInterval      = 500 * time.Millisecond
+)
 
 func main() {
 	// ── LED heartbeat ──
@@ -102,20 +105,27 @@ func main() {
 	// ── Main goroutine: LED heartbeat ──
 	for {
 		led.Low()
-		time.Sleep(displayRefreshInterval)
+		time.Sleep(heartbeatInterval)
 		led.High()
-		time.Sleep(displayRefreshInterval)
+		time.Sleep(heartbeatInterval)
 	}
 }
 
 // readCAN continuously polls the MCP2515 for incoming CAN frames
 // and updates vehicleData. ParseMessage acquires a write lock internally.
+//
+// NOTE: If the MCP2515 INT pin is wired to a GPIO, this could be replaced
+// with interrupt-driven reads (machine.PinInterrupt) to reduce CPU usage
+// and improve latency. With polling, the 1ms sleep is a trade-off between
+// responsiveness and CPU idle time.
 func readCAN(canDev *mcp2515.Device, data *can.VehicleData) {
 	for {
 		if canDev.Received() {
 			msg, err := canDev.Rx()
 			if err == nil && msg != nil {
 				data.ParseMessage(msg.ID, msg.Data)
+			} else if err != nil {
+				data.IncrementRxErrors()
 			}
 		} else {
 			time.Sleep(1 * time.Millisecond)

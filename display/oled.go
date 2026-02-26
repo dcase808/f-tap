@@ -78,7 +78,7 @@ func (o *OLED) ShowSplash() {
 
 // ShowWaiting shows the "waiting for CAN data" screen.
 func (o *OLED) ShowWaiting(msgCount uint32) {
-	o.dev.ClearDisplay()
+	o.dev.ClearBuffer()
 
 	tinyfont.WriteLine(&o.dev, &proggy.TinySZ8pt7b, 4, 12, "F-TAP  Listening", white)
 
@@ -97,17 +97,20 @@ func (o *OLED) ShowWaiting(msgCount uint32) {
 //
 // Layout (128×64):
 //
-//	Top-left:     Oil icon + oil temp
-//	Top-right:    Gear icon + trans oil temp
-//	Center:       G-force crosshair visualizer
-//	Bottom-left:  Thermometer icon + air temp
-//	Bottom-right: Current gear number
+//	Row 0-10:     Oil temp (left) | RPM (center) | Trans oil temp (right)
+//	Row 14-50:    G-force crosshair visualizer + lateral/longitudinal labels
+//	Row 52-60:    Air temp (left) | Speed (center) | Gear label (right)
 func (o *OLED) Render(data *can.VehicleState) {
-	o.dev.ClearDisplay()
+	o.dev.ClearBuffer()
 
 	// ── Top-left: Oil temp (drop icon + value) ──
 	drawIcon(&o.dev, 1, 1, iconOil[:], 7)
 	tinyfont.WriteLine(&o.dev, &proggy.TinySZ8pt7b, 10, 10, fmtF32(data.OilTemp)+"C", white)
+
+	// ── Top-center: Engine RPM ──
+	rpmStr := fmtF32(data.EngineSpeed) + "r"
+	rpmX := int16(screenWidth/2) - int16(len(rpmStr))*fontWidth/2
+	tinyfont.WriteLine(&o.dev, &proggy.TinySZ8pt7b, rpmX, 10, rpmStr, white)
 
 	// ── Top-right: Trans oil temp (gear icon + value) ──
 	drawIcon(&o.dev, 94, 1, iconGear[:], 8)
@@ -122,9 +125,14 @@ func (o *OLED) Render(data *can.VehicleState) {
 	drawIcon(&o.dev, 1, 52, iconThermo[:], 5)
 	tinyfont.WriteLine(&o.dev, &proggy.TinySZ8pt7b, 8, 60, fmtF32(data.AirTemp)+"C", white)
 
-	// ── Bottom-right: Gear number (just the digit) ──
-	gearStr := fmtF32(data.Gear)
-	gearX := int16(128 - len(gearStr)*fontWidth - 2)
+	// ── Bottom-center: Vehicle speed ──
+	spdStr := fmtF32(data.VehicleSpeedKph) + "kph"
+	spdX := int16(screenWidth/2) - int16(len(spdStr))*fontWidth/2
+	tinyfont.WriteLine(&o.dev, &proggy.TinySZ8pt7b, spdX, 60, spdStr, white)
+
+	// ── Bottom-right: Gear label ──
+	gearStr := gearLabel(data.Gear)
+	gearX := int16(screenWidth - len(gearStr)*fontWidth - 2)
 	tinyfont.WriteLine(&o.dev, &proggy.TinySZ8pt7b, gearX, 60, gearStr, white)
 
 	o.dev.Display()
@@ -140,13 +148,16 @@ func (o *OLED) smoothAccel(latAccel, longAccel float32) {
 
 // drawGForceLabels draws the X/Y acceleration labels beside the visualizer.
 func drawGForceLabels(dev *ssd1306.Device, latAccel, longAccel float32) {
+	rightLabelX := gCenterX + gRadius + 2
+	leftEdgeX := gCenterX - gRadius - 2
+
 	// Right side: X (lateral), left-aligned at circle_right + 2
-	tinyfont.WriteLine(dev, &proggy.TinySZ8pt7b, 84, 30, "X:"+fmtF32One(latAccel), white)
-	tinyfont.WriteLine(dev, &proggy.TinySZ8pt7b, 84, 40, "m/s2", white)
+	tinyfont.WriteLine(dev, &proggy.TinySZ8pt7b, rightLabelX, 30, "X:"+fmtF32One(latAccel), white)
+	tinyfont.WriteLine(dev, &proggy.TinySZ8pt7b, rightLabelX, 40, "m/s2", white)
 	// Left side: Y (longitudinal), right-aligned to circle_left - 2
 	yStr := "Y:" + fmtF32One(longAccel)
-	tinyfont.WriteLine(dev, &proggy.TinySZ8pt7b, 44-int16(len(yStr))*fontWidth, 30, yStr, white)
-	tinyfont.WriteLine(dev, &proggy.TinySZ8pt7b, 44-4*fontWidth, 40, "m/s2", white)
+	tinyfont.WriteLine(dev, &proggy.TinySZ8pt7b, leftEdgeX-int16(len(yStr))*fontWidth, 30, yStr, white)
+	tinyfont.WriteLine(dev, &proggy.TinySZ8pt7b, leftEdgeX-4*fontWidth, 40, "m/s2", white)
 }
 
 // drawGForceViz draws a circle with crosshair and a moving dot
@@ -238,20 +249,45 @@ func drawHLine(dev *ssd1306.Device, y int16) {
 	}
 }
 
-// ── Format Helpers ──
+// ── Gear Mapping ──
 
-// fmtF32 formats a float32 as an integer string (truncates decimals).
-func fmtF32(v float32) string {
-	return strconv.FormatInt(int64(v), 10)
+// gearLabel maps a raw gear value to a display label.
+// BMW F-Series EGS: 0=N, 1–8=forward gears, 14=P, 15=R.
+func gearLabel(raw float32) string {
+	g := int32(raw + 0.5) // round to nearest int
+	switch {
+	case g == 0:
+		return "N"
+	case g >= 1 && g <= 8:
+		return strconv.FormatInt(int64(g), 10)
+	case g == 14:
+		return "P"
+	case g == 15:
+		return "R"
+	default:
+		return "-"
+	}
 }
 
-// fmtF32One formats a float32 with one decimal place.
+// ── Format Helpers ──
+
+// fmtF32 formats a float32 as a rounded integer string.
+func fmtF32(v float32) string {
+	if v < 0 {
+		return "-" + strconv.FormatInt(int64(-v+0.5), 10)
+	}
+	return strconv.FormatInt(int64(v+0.5), 10)
+}
+
+// fmtF32One formats a float32 with one decimal place (rounded).
 func fmtF32One(v float32) string {
 	sign := ""
 	if v < 0 {
 		sign = "-"
 		v = -v
 	}
+	// Round to one decimal place
+	v += 0.05
 	intPart := int32(v)
 	fracPart := int32((v - float32(intPart)) * 10)
 	return sign + strconv.FormatInt(int64(intPart), 10) + "." + strconv.FormatInt(int64(fracPart), 10)
