@@ -32,10 +32,8 @@ const (
 	steeringAngleOffset float32 = 1440.11
 )
 
-// VehicleData holds the most recent decoded values from PT-CAN.
-// Float fields use float32 to preserve fractional scales on an RP2040.
-type VehicleData struct {
-	sync.RWMutex
+// VehicleState holds the actual data without the mutex.
+type VehicleState struct {
 	// Temperatures
 	AirTemp      float32 // °C  (PID 714)
 	OilTemp      float32 // °C  (PID 1017)
@@ -82,6 +80,13 @@ type VehicleData struct {
 	MsgCount    uint32 // Total CAN messages received
 	LastID      uint32 // Last CAN ID seen
 	Initialized bool   // True once any valid data has been parsed
+}
+
+// VehicleData holds the most recent decoded values from PT-CAN.
+// Float fields use float32 to preserve fractional scales on an RP2040.
+type VehicleData struct {
+	sync.RWMutex
+	VehicleState
 }
 
 // ParseMessage decodes a raw CAN message and updates VehicleData.
@@ -294,9 +299,9 @@ func (v *VehicleData) ParseMessage(id uint32, data []byte) bool {
 
 // Snapshot returns a point-in-time copy of the vehicle data.
 // The caller receives a plain value with no lock references.
-func (v *VehicleData) Snapshot() VehicleData {
+func (v *VehicleData) Snapshot() VehicleState {
 	v.RLock()
 	defer v.RUnlock()
 
-	return *v
+	return v.VehicleState
 }

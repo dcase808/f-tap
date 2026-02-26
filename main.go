@@ -117,6 +117,8 @@ func readCAN(canDev *mcp2515.Device, data *can.VehicleData) {
 			if err == nil && msg != nil {
 				data.ParseMessage(msg.ID, msg.Data)
 			}
+		} else {
+			time.Sleep(1 * time.Millisecond)
 		}
 	}
 }

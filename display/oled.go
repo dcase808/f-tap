@@ -102,7 +102,7 @@ func (o *OLED) ShowWaiting(msgCount uint32) {
 //	Center:       G-force crosshair visualizer
 //	Bottom-left:  Thermometer icon + air temp
 //	Bottom-right: Current gear number
-func (o *OLED) Render(data *can.VehicleData) {
+func (o *OLED) Render(data *can.VehicleState) {
 	o.dev.ClearDisplay()
 
 	// ── Top-left: Oil temp (drop icon + value) ──
@@ -247,12 +247,14 @@ func fmtF32(v float32) string {
 
 // fmtF32One formats a float32 with one decimal place.
 func fmtF32One(v float32) string {
+	sign := ""
+	if v < 0 {
+		sign = "-"
+		v = -v
+	}
 	intPart := int32(v)
 	fracPart := int32((v - float32(intPart)) * 10)
-	if fracPart < 0 {
-		fracPart = -fracPart
-	}
-	return strconv.FormatInt(int64(intPart), 10) + "." + strconv.FormatInt(int64(fracPart), 10)
+	return sign + strconv.FormatInt(int64(intPart), 10) + "." + strconv.FormatInt(int64(fracPart), 10)
 }
 
 func fmtU32(v uint32) string {
