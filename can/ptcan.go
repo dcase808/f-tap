@@ -34,6 +34,27 @@ const (
 	speedScaleMph       float32 = 0.009703125 // kph scale × 0.621371
 )
 
+// Signals is a bitmask of PT-CAN messages that have been decoded.
+type Signals uint16
+
+// One flag per message ID; set once the message has been decoded.
+const (
+	HasThrottlePosition Signals = 1 << iota
+	HasEngineSpeed
+	HasBrake
+	HasLongAccel
+	HasLatAccel
+	HasVehicleSpeed
+	HasBatteryCurrent
+	HasWheelSpeeds
+	HasBatteryVoltage
+	HasAirTemperature
+	HasSteeringAngle
+	HasTransOilTemp
+	HasGearOilTemp
+	HasAirPressure
+)
+
 // VehicleState holds the actual data without the mutex.
 type VehicleState struct {
 	// Temperatures
@@ -79,10 +100,21 @@ type VehicleState struct {
 	WheelSpeedRRMph float32 // mph  (PID 596)
 
 	// Metadata
-	MsgCount    uint32 // Total CAN messages received
-	RxErrors    uint32 // Total CAN receive errors
-	LastID      uint32 // Last CAN ID seen
-	Initialized bool   // True once any valid data has been parsed
+	MsgCount uint32  // Total CAN messages received
+	RxErrors uint32  // Total CAN receive errors
+	LastID   uint32  // Last CAN ID seen
+	Valid    Signals // Messages decoded since the bus last went silent
+}
+
+// Has reports whether all of the given messages have been decoded.
+// A field is only meaningful while the flag of its message is set.
+func (s *VehicleState) Has(sig Signals) bool {
+	return s.Valid&sig == sig
+}
+
+// Initialized reports whether any valid data has been parsed.
+func (s *VehicleState) Initialized() bool {
+	return s.Valid != 0
 }
 
 // VehicleData holds the most recent decoded values from PT-CAN.
@@ -109,7 +141,7 @@ func (v *VehicleData) ParseMessage(id uint32, data []byte) bool {
 		if len(data) >= 1 {
 			raw := uint16(data[0])
 			v.AirPressure = float32(raw)*2 + airPressureOffset
-			v.Initialized = true
+			v.Valid |= HasAirPressure
 		}
 		return true
 
@@ -119,7 +151,7 @@ func (v *VehicleData) ParseMessage(id uint32, data []byte) bool {
 		if len(data) >= 2 {
 			raw := uint16(data[1])
 			v.AirTemp = float32(raw)*0.5 - 40
-			v.Initialized = true
+			v.Valid |= HasAirTemperature
 		}
 		return true
 
@@ -130,7 +162,7 @@ func (v *VehicleData) ParseMessage(id uint32, data []byte) bool {
 			raw := uint16(data[0]) | (uint16(data[1]) << 8)
 			raw &= 0x0FFF // 12 bits
 			v.BatteryVoltage = float32(raw) * 15
-			v.Initialized = true
+			v.Valid |= HasBatteryVoltage
 		}
 		return true
 
@@ -147,7 +179,7 @@ func (v *VehicleData) ParseMessage(id uint32, data []byte) bool {
 			rawBL := uint16((data[0] >> 2) & 0x03)
 			v.BrakeLight = float32(rawBL) * 0.5
 
-			v.Initialized = true
+			v.Valid |= HasBrake
 		}
 		return true
 
@@ -157,7 +189,7 @@ func (v *VehicleData) ParseMessage(id uint32, data []byte) bool {
 		if len(data) >= 5 {
 			raw := uint16(data[3]) | (uint16(data[4]) << 8)
 			v.BatteryCurrent = float32(raw)*0.02 - 200
-			v.Initialized = true
+			v.Valid |= HasBatteryCurrent
 		}
 		return true
 
@@ -172,7 +204,7 @@ func (v *VehicleData) ParseMessage(id uint32, data []byte) bool {
 			rawOil := uint16(data[5])
 			v.OilTemp = float32(rawOil) - 48
 
-			v.Initialized = true
+			v.Valid |= HasGearOilTemp
 		}
 		return true
 
@@ -182,7 +214,7 @@ func (v *VehicleData) ParseMessage(id uint32, data []byte) bool {
 		if len(data) >= 2 {
 			raw := uint16(data[1])
 			v.TransOilTemp = float32(raw) - 48
-			v.Initialized = true
+			v.Valid |= HasTransOilTemp
 		}
 		return true
 
@@ -192,7 +224,7 @@ func (v *VehicleData) ParseMessage(id uint32, data []byte) bool {
 		if len(data) >= 4 {
 			raw := uint16(data[2]) | (uint16(data[3]) << 8)
 			v.LongAccel = float32(raw)*0.002 - 65
-			v.Initialized = true
+			v.Valid |= HasLongAccel
 		}
 		return true
 
@@ -202,7 +234,7 @@ func (v *VehicleData) ParseMessage(id uint32, data []byte) bool {
 		if len(data) >= 4 {
 			raw := uint16(data[2]) | (uint16(data[3]) << 8)
 			v.LatAccel = float32(raw)*0.002 - 65
-			v.Initialized = true
+			v.Valid |= HasLatAccel
 		}
 		return true
 
@@ -214,7 +246,7 @@ func (v *VehicleData) ParseMessage(id uint32, data []byte) bool {
 			raw := (uint16(data[1]) >> 4) | (uint16(data[2]) << 4)
 			raw &= 0x0FFF // 12 bits
 			v.EngineSpeed = float32(raw) * 10
-			v.Initialized = true
+			v.Valid |= HasEngineSpeed
 		}
 		return true
 
@@ -229,7 +261,7 @@ func (v *VehicleData) ParseMessage(id uint32, data []byte) bool {
 			// Indicated_Vehicle_Speed_mph: Scale=0.009703125
 			v.VehicleSpeedMph = float32(raw) * speedScaleMph
 
-			v.Initialized = true
+			v.Valid |= HasVehicleSpeed
 		}
 		return true
 
@@ -252,7 +284,7 @@ func (v *VehicleData) ParseMessage(id uint32, data []byte) bool {
 			v.WheelSpeedFLMph = float32(rawFL) * speedScaleMph
 			v.WheelSpeedFRMph = float32(rawFR) * speedScaleMph
 
-			v.Initialized = true
+			v.Valid |= HasWheelSpeeds
 		}
 		return true
 
@@ -262,7 +294,7 @@ func (v *VehicleData) ParseMessage(id uint32, data []byte) bool {
 		if len(data) >= 4 {
 			raw := uint16(data[2]) | (uint16(data[3]) << 8)
 			v.SteeringAngle = float32(raw)*steeringAngleScale - steeringAngleOffset
-			v.Initialized = true
+			v.Valid |= HasSteeringAngle
 		}
 		return true
 
@@ -273,7 +305,7 @@ func (v *VehicleData) ParseMessage(id uint32, data []byte) bool {
 			raw := uint16(data[2]) | (uint16(data[3]) << 8)
 			raw &= 0x0FFF // 12 bits
 			v.ThrottlePos = float32(raw) * 0.025
-			v.Initialized = true
+			v.Valid |= HasThrottlePosition
 		}
 		return true
 	}
@@ -295,6 +327,14 @@ func (v *VehicleData) IncrementRxErrors() {
 	v.Lock()
 	defer v.Unlock()
 	v.RxErrors++
+}
+
+// Invalidate marks every message as not received, e.g. once the bus has gone
+// quiet, so stale values are no longer presented as live. Counters are kept.
+func (v *VehicleData) Invalidate() {
+	v.Lock()
+	defer v.Unlock()
+	v.Valid = 0
 }
 
 // Snapshot returns a point-in-time copy of the vehicle data.

@@ -11,8 +11,6 @@ import (
 	"machine"
 	"time"
 
-	"tinygo.org/x/drivers/mcp2515"
-
 	"github.com/dcase808/f-tap/can"
 	"github.com/dcase808/f-tap/display"
 )
@@ -23,7 +21,7 @@ const (
 	pinSCK = machine.GP18 // SPI0 SCK
 	pinTX  = machine.GP19 // SPI0 TX  (MOSI)
 	pinRX  = machine.GP16 // SPI0 RX  (MISO)
-	pinCS  = machine.GP17 // SPI0 CS  (directly controlled by driver)
+	pinCS  = machine.GP17 // SPI0 CS  (driven directly, see mcp2515.go)
 )
 
 // OLED (I2C1)
@@ -32,16 +30,21 @@ const (
 	pinSCL = machine.GP15 // I2C1 SCL
 )
 
-// CAN Bus configuration
+// CAN Bus configuration: MCP2515 bit timing for 500 kbps (BMW PT-CAN) with
+// an 8 MHz crystal. For a 16 MHz crystal use 0x00, 0xF0, 0x86.
 const (
-	canSpeed = mcp2515.CAN500kBps // BMW PT-CAN = 500 kbps
-	canClock = mcp2515.Clock8MHz  // MCP2515 crystal oscillator frequency
+	canCNF1 byte = 0x00
+	canCNF2 byte = 0x90
+	canCNF3 byte = 0x02
 )
 
 // Timing intervals
 const (
 	displayRefreshInterval = 50 * time.Millisecond
 	heartbeatInterval      = 500 * time.Millisecond
+	canPollInterval        = 200 * time.Microsecond // idle sleep between MCP2515 polls
+	canCheckInterval       = 100 * time.Millisecond // overflow and bus silence checks
+	busTimeout             = 2 * time.Second        // bus silent this long → data is stale
 )
 
 func main() {
@@ -80,18 +83,19 @@ func main() {
 		Mode:      0,
 	})
 	if err != nil {
+		oled.ShowError("SPI init failed", "Check SPI pins")
 		blinkError(led)
 	}
 
-	// ── Initialize MCP2515 CAN controller ──
+	// ── Initialize MCP2515 CAN controller (Listen-Only, see mcp2515.go) ──
 	cs := pinCS
 	cs.Configure(machine.PinConfig{Mode: machine.PinOutput})
 	cs.High()
 
-	canDev := mcp2515.New(spi, cs)
-	canDev.Configure()
-	err = canDev.Begin(canSpeed, canClock)
+	canDev := mcp2515{spi: spi, cs: cs}
+	err = canDev.initListenOnly(canCNF1, canCNF2, canCNF3)
 	if err != nil {
+		oled.ShowError("CAN init failed", err.Error())
 		blinkError(led)
 	}
 
@@ -102,33 +106,54 @@ func main() {
 	go readCAN(canDev, &vehicleData)
 	go renderDisplay(oled, &vehicleData)
 
-	// ── Main goroutine: LED heartbeat ──
+	// ── Main goroutine: LED heartbeat + bus statistics on serial ──
 	for {
 		led.Low()
 		time.Sleep(heartbeatInterval)
 		led.High()
 		time.Sleep(heartbeatInterval)
+
+		snap := vehicleData.Snapshot()
+		println("msgs:", snap.MsgCount, "rx errors:", snap.RxErrors, "last id:", snap.LastID)
 	}
 }
 
 // readCAN continuously polls the MCP2515 for incoming CAN frames
 // and updates vehicleData. ParseMessage acquires a write lock internally.
+// Frames the MCP2515 had to drop are counted as receive errors, and the data
+// is invalidated once the bus has been silent for busTimeout.
 //
 // NOTE: If the MCP2515 INT pin is wired to a GPIO, this could be replaced
 // with interrupt-driven reads (machine.PinInterrupt) to reduce CPU usage
-// and improve latency. With polling, the 1ms sleep is a trade-off between
-// responsiveness and CPU idle time.
-func readCAN(canDev *mcp2515.Device, data *can.VehicleData) {
+// and improve latency. With polling, the idle sleep has to stay well below
+// the time two frames take to arrive (~450µs at 500 kbps), because the
+// MCP2515 buffers only two.
+func readCAN(canDev mcp2515, data *can.VehicleData) {
+	var frame canFrame
+	lastRx := time.Now()
+	lastCheck := lastRx
+
 	for {
-		if canDev.Received() {
-			msg, err := canDev.Rx()
-			if err == nil && msg != nil {
-				data.ParseMessage(msg.ID, msg.Data)
-			} else if err != nil {
-				data.IncrementRxErrors()
+		now := time.Now()
+
+		if canDev.receive(&frame) {
+			lastRx = now
+			// PT-CAN signals are 11-bit data frames: skip extended and remote frames
+			if !frame.ext && !frame.rtr {
+				data.ParseMessage(frame.id, frame.data[:frame.dlc])
 			}
 		} else {
-			time.Sleep(1 * time.Millisecond)
+			time.Sleep(canPollInterval)
+		}
+
+		if now.Sub(lastCheck) >= canCheckInterval {
+			lastCheck = now
+			if canDev.rxOverflowed() {
+				data.IncrementRxErrors()
+			}
+			if now.Sub(lastRx) >= busTimeout {
+				data.Invalidate()
+			}
 		}
 	}
 }
@@ -141,7 +166,7 @@ func renderDisplay(oled *display.OLED, data *can.VehicleData) {
 		time.Sleep(displayRefreshInterval)
 
 		snap := data.Snapshot()
-		if snap.Initialized {
+		if snap.Initialized() {
 			oled.Render(&snap)
 		} else {
 			oled.ShowWaiting(snap.MsgCount)

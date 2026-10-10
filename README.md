@@ -16,7 +16,7 @@ Taps into the BMW F-Series **PT-CAN** (Powertrain CAN) bus, decodes key vehicle 
 | Lateral_Accel | `0x19A` (410) | 16:16 | `raw × 0.002 − 65` | m/s² |
 | Vehicle_Speed_kph | `0x1A1` (417) | 16:16 | `raw × 0.015625` | km/h |
 | Vehicle_Speed_mph | `0x1A1` (417) | 16:16 | `raw × 0.009703125` | mph |
-| Battery_Current | `0x1BA` (442) | 24:16 | `raw × 0.02 − 200` | — |
+| Battery_Current | `0x1BA` (442) | 24:16 | `raw × 0.02 − 200` | A |
 | Wheel_Speed_RL | `0x254` (596) | 0:15 | `raw × 0.015625` (Signed) | km/h |
 | Wheel_Speed_RR | `0x254` (596) | 16:15 | `raw × 0.015625` (Signed) | km/h |
 | Wheel_Speed_FL | `0x254` (596) | 32:15 | `raw × 0.015625` (Signed) | km/h |
@@ -26,7 +26,7 @@ Taps into the BMW F-Series **PT-CAN** (Powertrain CAN) bus, decodes key vehicle 
 | Steering_Angle | `0x301` (769) | 16:16 | `raw × 0.04395 − 1440.11` | ° |
 | Trans_Oil_Temp | `0x39A` (922) | 8:8 | `raw − 48` | °C |
 | Oil_Temperature | `0x3F9` (1017) | 40:8 | `raw − 48` | °C |
-| Gear | `0x3F9` (1017) | 48:4 | `raw × 1` | — |
+| Gear | `0x3F9` (1017) | 48:4 | `raw − 4` | — |
 | Air_Pressure | `0x3FB` (1019) | 0:8 | `raw × 2 + 598` | mbar |
 
 Wheel speeds are also decoded in mph (`× 0.009703125`) from the same PID `0x254`.
@@ -36,25 +36,29 @@ Wheel speeds are also decoded in mph (`× 0.009703125`) from the same PID `0x254
 ## OLED Display Layout
 
 128×64 pixel monochrome display using proggy TinySZ8pt7b font (6px/char).
-Values in four corners with pixel-art icons, G-force visualizer in center.
+Values along the top and bottom edges with pixel-art icons, G-force visualizer in center.
 
 ```
 ┌────────────────────────────────────────┐
-│ 💧95C                         ⚙82C    │
+│ 💧95C           2500r         ⚙82C    │
 │            ╭──────────────╮            │
-│  Y:-5      │      ┼       │     X:8   │
-│  m/s2      │   ───●───    │     m/s2  │
+│  Y:-0.5    │      ┼       │    X:0.8   │
+│  m/s2      │   ───●───    │    m/s2    │
 │            │      ┼       │            │
 │            ╰──────────────╯            │
-│ 🌡22C                             3    │
+│ 🌡22C           87kph             3    │
 └────────────────────────────────────────┘
 ```
 
 - **💧** Oil drop (7×8px) — engine oil temperature (top-left)
+- **RPM** — engine speed, `r` suffix (top-center)
 - **⚙** Gear/cog (8×8px) — transmission oil temperature (top-right)
 - **🌡** Thermometer (5×8px) — air temperature (bottom-left)
-- **Gear** — plain number (bottom-right)
+- **Speed** — vehicle speed in km/h (bottom-center)
+- **Gear** — `N`, `1`–`8`, `R` or `P` (bottom-right)
 - **G-force** — crosshair with dot (center), Y/X values in m/s² on each side
+
+A value shows `--` until its CAN message has been received. If the bus stays silent for 2 seconds, the display returns to the "Waiting for PT-CAN data" screen. Initialization errors (such as a missing MCP2515) are shown on screen.
 
 ## Hardware
 
@@ -63,6 +67,8 @@ Values in four corners with pixel-art icons, G-force visualizer in center.
 | Raspberry Pi Pico   | RP2040 microcontroller                   |
 | MCP2515 Module      | SPI CAN bus controller (8 MHz crystal)   |
 | 2.42" OLED          | SSD1309, 128×64, I2C (0x3C)             |
+
+CAN bit timing is set for an 8 MHz crystal. For a 16 MHz module, change `canCNF1`–`canCNF3` in [`main.go`](main.go).
 
 ## Wiring
 
@@ -81,6 +87,8 @@ Values in four corners with pixel-art icons, G-force visualizer in center.
  3V3         ──────────────────────────────▶ VCC
  GND         ──────────────────────────────▶ GND
 ```
+
+> **Note:** The common MCP2515 breakout carries a TJA1050 transceiver, which is specified for a 4.75–5.25 V supply. If reception is unreliable on 3V3, power the transceiver from 5 V while keeping the SPI lines at 3.3 V (level-shift `SO`; the Pico's GPIOs are not 5 V tolerant), or use a board with a 3.3 V transceiver such as the SN65HVD230.
 
 ## Build & Flash
 
@@ -102,19 +110,28 @@ Or manually:
 tinygo flash -target=pico .
 ```
 
+The serial monitor prints bus statistics once per second: `msgs` (frames received), `rx errors` (receive-buffer overflows in the MCP2515, i.e. dropped frames) and `last id` (ID of the last frame, decimal).
+
+`make build TARGET=pico-w` also works, but the Pico W's LED is wired to its wireless chip, so there is no heartbeat or error blink on that board. Errors still appear on the OLED.
+
 ## PT-CAN Connection
 
 > ⚠️ **WARNING:** Only connect in **listen-only mode**. Incorrect CAN bus connections can interfere with vehicle systems. Always tap — never inject.
 
+The firmware runs the MCP2515 in Listen-Only mode: it never acknowledges frames, sends error frames or transmits.
+
 BMW F-Series PT-CAN runs at **500 kbps**. Connect directly at the DME/DDE or other PT-CAN ECUs.
 
-Connect MCP2515 **CAN-H** and **CAN-L** to the PT-CAN bus. A 120Ω termination resistor may be needed depending on your tap point.
+Connect MCP2515 **CAN-H** and **CAN-L** to the PT-CAN bus. The car's bus is already terminated at both ends, so do not add termination at the tap: remove the 120Ω jumper on the MCP2515 module. Termination is only needed on a bench setup that has none.
+
+On a bench, keep in mind that a listen-only node does not acknowledge frames. A lone transmitter needs a second, normal node on the bus, or it will keep retransmitting.
 
 ## Project Structure
 
 ```
 f-tap/
 ├── main.go               # Entry point, hardware init, main loop
+├── mcp2515.go            # MCP2515 Listen-Only setup & frame reception
 ├── can/
 │   └── ptcan.go          # BMW PT-CAN message IDs & decoder
 ├── display/
@@ -122,4 +139,4 @@ f-tap/
 ├── go.mod
 ├── Makefile
 └── README.md
-``
+```

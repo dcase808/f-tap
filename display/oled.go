@@ -19,6 +19,7 @@ const (
 	screenHeight = 64
 	i2cAddr      = 0x3C
 	fontWidth    = 6
+	noData       = "--" // shown for a value whose message has not been received
 )
 
 // G-force visualizer parameters
@@ -93,7 +94,23 @@ func (o *OLED) ShowWaiting(msgCount uint32) {
 	o.dev.Display()
 }
 
-// Render draws the main vehicle data screen.
+// ShowError shows a fatal initialization error. It stays on screen until
+// the device is reset.
+func (o *OLED) ShowError(title, detail string) {
+	o.dev.ClearBuffer()
+
+	tinyfont.WriteLine(&o.dev, &proggy.TinySZ8pt7b, 4, 12, "F-TAP  Error", white)
+
+	drawHLine(&o.dev, 16)
+
+	tinyfont.WriteLine(&o.dev, &proggy.TinySZ8pt7b, 4, 30, title, white)
+	tinyfont.WriteLine(&o.dev, &proggy.TinySZ8pt7b, 4, 42, detail, white)
+
+	o.dev.Display()
+}
+
+// Render draws the main vehicle data screen. Values whose message has not
+// been received are drawn as a placeholder.
 //
 // Layout (128×64):
 //
@@ -105,33 +122,43 @@ func (o *OLED) Render(data *can.VehicleState) {
 
 	// ── Top-left: Oil temp (drop icon + value) ──
 	drawIcon(&o.dev, 1, 1, iconOil[:], 7)
-	tinyfont.WriteLine(&o.dev, &proggy.TinySZ8pt7b, 10, 10, fmtF32(data.OilTemp)+"C", white)
+	tinyfont.WriteLine(&o.dev, &proggy.TinySZ8pt7b, 10, 10, fmtSignal(data, can.HasGearOilTemp, data.OilTemp)+"C", white)
 
 	// ── Top-center: Engine RPM ──
-	rpmStr := fmtF32(data.EngineSpeed) + "r"
+	rpmStr := fmtSignal(data, can.HasEngineSpeed, data.EngineSpeed) + "r"
 	rpmX := int16(screenWidth/2) - int16(len(rpmStr))*fontWidth/2
 	tinyfont.WriteLine(&o.dev, &proggy.TinySZ8pt7b, rpmX, 10, rpmStr, white)
 
 	// ── Top-right: Trans oil temp (gear icon + value) ──
 	drawIcon(&o.dev, 94, 1, iconGear[:], 8)
-	tinyfont.WriteLine(&o.dev, &proggy.TinySZ8pt7b, 104, 10, fmtF32(data.TransOilTemp)+"C", white)
+	tinyfont.WriteLine(&o.dev, &proggy.TinySZ8pt7b, 104, 10, fmtSignal(data, can.HasTransOilTemp, data.TransOilTemp)+"C", white)
 
 	// ── Center: G-force visualizer ──
-	o.smoothAccel(data.LatAccel, data.LongAccel)
-	drawGForceViz(&o.dev, o.smoothedLatAccel, o.smoothedLongAccel)
-	drawGForceLabels(&o.dev, o.smoothedLatAccel, o.smoothedLongAccel)
+	drawGForceFrame(&o.dev)
+	if data.Has(can.HasLatAccel | can.HasLongAccel) {
+		o.smoothAccel(data.LatAccel, data.LongAccel)
+		drawGForceDot(&o.dev, o.smoothedLatAccel, o.smoothedLongAccel)
+		drawGForceLabels(&o.dev, fmtF32One(o.smoothedLatAccel), fmtF32One(o.smoothedLongAccel))
+	} else {
+		// No acceleration data: restart smoothing from rest once it arrives
+		o.smoothedLatAccel, o.smoothedLongAccel = 0, 0
+		drawGForceLabels(&o.dev, noData, noData)
+	}
 
 	// ── Bottom-left: Air temp (thermometer icon + value) ──
 	drawIcon(&o.dev, 1, 52, iconThermo[:], 5)
-	tinyfont.WriteLine(&o.dev, &proggy.TinySZ8pt7b, 8, 60, fmtF32(data.AirTemp)+"C", white)
+	tinyfont.WriteLine(&o.dev, &proggy.TinySZ8pt7b, 8, 60, fmtSignal(data, can.HasAirTemperature, data.AirTemp)+"C", white)
 
 	// ── Bottom-center: Vehicle speed ──
-	spdStr := fmtF32(data.VehicleSpeedKph) + "kph"
+	spdStr := fmtSignal(data, can.HasVehicleSpeed, data.VehicleSpeedKph) + "kph"
 	spdX := int16(screenWidth/2) - int16(len(spdStr))*fontWidth/2
 	tinyfont.WriteLine(&o.dev, &proggy.TinySZ8pt7b, spdX, 60, spdStr, white)
 
 	// ── Bottom-right: Gear label ──
-	gearStr := gearLabel(data.Gear)
+	gearStr := noData
+	if data.Has(can.HasGearOilTemp) {
+		gearStr = gearLabel(data.Gear)
+	}
 	gearX := int16(screenWidth - len(gearStr)*fontWidth - 2)
 	tinyfont.WriteLine(&o.dev, &proggy.TinySZ8pt7b, gearX, 60, gearStr, white)
 
@@ -147,22 +174,21 @@ func (o *OLED) smoothAccel(latAccel, longAccel float32) {
 }
 
 // drawGForceLabels draws the X/Y acceleration labels beside the visualizer.
-func drawGForceLabels(dev *ssd1306.Device, latAccel, longAccel float32) {
+func drawGForceLabels(dev *ssd1306.Device, latStr, longStr string) {
 	rightLabelX := gCenterX + gRadius + 2
 	leftEdgeX := gCenterX - gRadius - 2
 
 	// Right side: X (lateral), left-aligned at circle_right + 2
-	tinyfont.WriteLine(dev, &proggy.TinySZ8pt7b, rightLabelX, 30, "X:"+fmtF32One(latAccel), white)
+	tinyfont.WriteLine(dev, &proggy.TinySZ8pt7b, rightLabelX, 30, "X:"+latStr, white)
 	tinyfont.WriteLine(dev, &proggy.TinySZ8pt7b, rightLabelX, 40, "m/s2", white)
 	// Left side: Y (longitudinal), right-aligned to circle_left - 2
-	yStr := "Y:" + fmtF32One(longAccel)
+	yStr := "Y:" + longStr
 	tinyfont.WriteLine(dev, &proggy.TinySZ8pt7b, leftEdgeX-int16(len(yStr))*fontWidth, 30, yStr, white)
 	tinyfont.WriteLine(dev, &proggy.TinySZ8pt7b, leftEdgeX-4*fontWidth, 40, "m/s2", white)
 }
 
-// drawGForceViz draws a circle with crosshair and a moving dot
-// representing current lateral and longitudinal acceleration.
-func drawGForceViz(dev *ssd1306.Device, latAccel, longAccel float32) {
+// drawGForceFrame draws the circle with crosshair of the G-force visualizer.
+func drawGForceFrame(dev *ssd1306.Device) {
 	// Circle outline
 	drawCircle(dev, gCenterX, gCenterY, gRadius)
 
@@ -173,7 +199,11 @@ func drawGForceViz(dev *ssd1306.Device, latAccel, longAccel float32) {
 	for y := gCenterY - gRadius; y <= gCenterY+gRadius; y++ {
 		dev.SetPixel(gCenterX, y, white)
 	}
+}
 
+// drawGForceDot draws the moving dot representing current lateral and
+// longitudinal acceleration.
+func drawGForceDot(dev *ssd1306.Device, latAccel, longAccel float32) {
 	// Map acceleration → pixel offset (lateral=X, longitudinal=Y inverted)
 	dx := int16(latAccel * float32(gRadius) / gMaxAccel)
 	dy := int16(-longAccel * float32(gRadius) / gMaxAccel)
@@ -256,7 +286,7 @@ func drawHLine(dev *ssd1306.Device, y int16) {
 // Expected mapping: 0=N, 1–8=forward gears, -1=R, 11=P.
 // Verify R and P assignments on hardware.
 func gearLabel(v float32) string {
-	g := int32(v + 0.5) // round to nearest int (offset already applied)
+	g := roundF32(v) // offset already applied
 	switch {
 	case g == 0:
 		return "N"
@@ -273,12 +303,26 @@ func gearLabel(v float32) string {
 
 // ── Format Helpers ──
 
+// roundF32 rounds to the nearest integer, halves away from zero.
+func roundF32(v float32) int32 {
+	if v < 0 {
+		return -int32(-v + 0.5)
+	}
+	return int32(v + 0.5)
+}
+
 // fmtF32 formats a float32 as a rounded integer string.
 func fmtF32(v float32) string {
-	if v < 0 {
-		return "-" + strconv.FormatInt(int64(-v+0.5), 10)
+	return strconv.FormatInt(int64(roundF32(v)), 10)
+}
+
+// fmtSignal formats v like fmtF32, or as a placeholder while the message
+// carrying it has not been received.
+func fmtSignal(data *can.VehicleState, sig can.Signals, v float32) string {
+	if !data.Has(sig) {
+		return noData
 	}
-	return strconv.FormatInt(int64(v+0.5), 10)
+	return fmtF32(v)
 }
 
 // fmtF32One formats a float32 with one decimal place (rounded).
@@ -292,6 +336,9 @@ func fmtF32One(v float32) string {
 	v += 0.05
 	intPart := int32(v)
 	fracPart := int32((v - float32(intPart)) * 10)
+	if intPart == 0 && fracPart == 0 {
+		sign = "" // no "-0.0"
+	}
 	return sign + strconv.FormatInt(int64(intPart), 10) + "." + strconv.FormatInt(int64(fracPart), 10)
 }
 
